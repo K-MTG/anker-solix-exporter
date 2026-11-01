@@ -10,7 +10,8 @@ Load-bearing details. See `README.md` for everything else.
 - **Don't restart the handshake during the button window.** It voids a press in progress (`_negotiation_should_restart`).
 - **Leave ~40 s between attempts after a failed handshake.** A quick retry got replies that wouldn't decrypt.
 - **A watt reading of 0 means "below what the unit reports", not "no load".** About 27 W read 0 outside charging.
-  That's why `nut_real_power_watts` is left out at 0.
+  That's why `anker_real_power_watts` is left out at 0.
+- **Metrics use the `anker_` prefix, never `nut_`.** The ones mirroring the NUT exporter keep its names after the prefix.
 - **Don't invent NUT flags.** The unit reports no replace-battery flag, so `RB` isn't exported.
 - **SolixBLE's auto-reconnect never rescans.** A `bluetoothd` restart (e.g. an unattended bluez upgrade) makes BlueZ
   forget every device, and its saved device object then fails until something scans. `Exporter.supervise` handles this:

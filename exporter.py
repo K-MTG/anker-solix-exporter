@@ -1,8 +1,9 @@
 """Prometheus exporter for an Anker SOLIX F2000 used as a UPS, over Bluetooth.
 
-Uses SolixBLE to talk to the unit, keeps the latest readings, and serves them on /metrics using the
-same metric names as the NUT exporter where the meaning matches. It can also turn the AC outlets back
-on. It can never turn anything off: see Device._send_command.
+Uses SolixBLE to talk to the unit, keeps the latest readings, and serves them on /metrics. Where a reading
+means the same as on the NUT exporter, the metric has the same name and shape with an anker_ prefix instead
+of nut_, so dashboards can show both. It can also turn the AC outlets back on. It can never turn anything
+off: see Device._send_command.
 """
 
 import asyncio
@@ -210,40 +211,40 @@ def _line(name, value, **labels):
 
 
 def render_metrics(ups, readings, stats, link_up, telemetry_age):
-    """Render the readings. NUT names are used only where they mean the same as for the other UPSes."""
+    """Render the readings. The first group mirrors the NUT exporter's metrics, with an anker_ prefix."""
     r = readings
     out = []
 
-    def nut(name, value, **labels):
+    def metric(name, value, **labels):
         out.append(_line(name, value, ups=ups, **labels))
 
     def add(name, key, scale=1):
         if key in r:
-            nut(name, r[key] * scale)
+            metric(name, r[key] * scale)
 
     info = {"manufacturer": "Anker", "model": "SOLIX F2000", "description": "Anker SOLIX F2000", "device_type": "ups"}
     if "serial" in r:
         info["serial"] = r["serial"]
     if "firmware" in r:
         info["ups_firmware"] = ".".join(str(r["firmware"]))
-    nut("nut_ups_info", 1, **info)
+    metric("anker_ups_info", 1, **info)
 
     if "input_state" in r:
         on_mains = r["input_state"] in AC_INPUT_STATES
-        nut("nut_status", 1 if on_mains else 2)
-        nut("nut_ups_status", 1 if on_mains else 0, status="OL")
-        nut("nut_ups_status", 0 if on_mains else 1, status="OB")
+        metric("anker_status", 1 if on_mains else 2)
+        metric("anker_ups_status", 1 if on_mains else 0, status="OL")
+        metric("anker_ups_status", 0 if on_mains else 1, status="OB")
     if "battery_state" in r:
-        nut("nut_ups_status", 1 if r["battery_state"] == BATTERY_CHARGING else 0, status="CHRG")
-        nut("nut_ups_status", 1 if r["battery_state"] == BATTERY_DISCHARGING else 0, status="DISCHRG")
+        metric("anker_ups_status", 1 if r["battery_state"] == BATTERY_CHARGING else 0, status="CHRG")
+        metric("anker_ups_status", 1 if r["battery_state"] == BATTERY_DISCHARGING else 0, status="DISCHRG")
     if "battery_percent" in r:
-        nut("nut_battery_charge", r["battery_percent"] / 100)
+        metric("anker_battery_charge", r["battery_percent"] / 100)
     # Time remaining is noise on mains at 100%, and time to full while charging.
     if r.get("battery_state") == BATTERY_DISCHARGING and "time_remaining" in r:
-        nut("nut_battery_runtime_seconds", r["time_remaining"] * SECONDS_PER_REMAINING_UNIT)
+        metric("anker_battery_runtime_seconds", r["time_remaining"] * SECONDS_PER_REMAINING_UNIT)
     # 0 here means below what the unit reports (about 27 W read 0), not "no load", so leave it out.
     if r.get("ac_output_watts"):
-        nut("nut_real_power_watts", r["ac_output_watts"])
+        metric("anker_real_power_watts", r["ac_output_watts"])
 
     add("anker_input_watts", "input_watts")
     add("anker_ac_output_watts", "ac_output_watts")
@@ -256,14 +257,14 @@ def render_metrics(ups, readings, stats, link_up, telemetry_age):
     add("anker_auto_off_minutes", "auto_off_minutes")
     add("anker_time_remaining_seconds", "time_remaining", SECONDS_PER_REMAINING_UNIT)
     if "battery_health" in r:
-        nut("anker_battery_health_ratio", r["battery_health"] / 100)
+        metric("anker_battery_health_ratio", r["battery_health"] / 100)
 
-    nut("anker_ble_connected", 1 if link_up else 0)
+    metric("anker_ble_connected", 1 if link_up else 0)
     if telemetry_age is not None:
-        nut("anker_last_telemetry_age_seconds", round(telemetry_age, 1))
-    nut("anker_status_requests_total", stats.status_ok, result="ok")
-    nut("anker_status_requests_total", stats.status_failed, result="failed")
-    nut("anker_ac_on_commands_total", stats.ac_on_commands)
+        metric("anker_last_telemetry_age_seconds", round(telemetry_age, 1))
+    metric("anker_status_requests_total", stats.status_ok, result="ok")
+    metric("anker_status_requests_total", stats.status_failed, result="failed")
+    metric("anker_ac_on_commands_total", stats.ac_on_commands)
     return "\n".join(out) + "\n"
 
 

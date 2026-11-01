@@ -52,34 +52,34 @@ def test_negative_temperature():
     assert exporter.read_int(params(bd="01f6"), "bd", signed=True) == -10
 
 
-def test_on_mains_matches_nut_shape():
+def test_on_mains_mirrors_the_nut_shape_with_an_anker_prefix():
     text = metrics(ON_MAINS)
-    assert 'nut_status{ups="fh-sc-ups1"} 1' in text
-    assert 'nut_ups_status{status="OL",ups="fh-sc-ups1"} 1' in text
-    assert 'nut_ups_status{status="OB",ups="fh-sc-ups1"} 0' in text
-    assert 'nut_battery_charge{ups="fh-sc-ups1"} 1.0' in text
+    assert 'anker_status{ups="fh-sc-ups1"} 1' in text
+    assert 'anker_ups_status{status="OL",ups="fh-sc-ups1"} 1' in text
+    assert 'anker_ups_status{status="OB",ups="fh-sc-ups1"} 0' in text
+    assert 'anker_battery_charge{ups="fh-sc-ups1"} 1.0' in text
     assert 'ups_firmware="5.2.3"' in text
 
 
 def test_time_remaining_only_as_runtime_on_battery():
-    assert "nut_battery_runtime_seconds" not in metrics(ON_MAINS)
-    assert 'nut_battery_runtime_seconds{ups="fh-sc-ups1"} 179' in metrics(ON_BATTERY)
+    assert "anker_battery_runtime_seconds" not in metrics(ON_MAINS)
+    assert 'anker_battery_runtime_seconds{ups="fh-sc-ups1"} 179' in metrics(ON_BATTERY)
 
 
 def test_on_battery_raises_the_flag_the_alert_uses():
     text = metrics(ON_BATTERY)
-    assert 'nut_ups_status{status="OB",ups="fh-sc-ups1"} 1' in text
-    assert 'nut_status{ups="fh-sc-ups1"} 2' in text
-    assert 'nut_ups_status{status="DISCHRG",ups="fh-sc-ups1"} 1' in text
+    assert 'anker_ups_status{status="OB",ups="fh-sc-ups1"} 1' in text
+    assert 'anker_status{ups="fh-sc-ups1"} 2' in text
+    assert 'anker_ups_status{status="DISCHRG",ups="fh-sc-ups1"} 1' in text
 
 
 def test_solar_only_counts_as_on_battery():
-    assert 'nut_ups_status{status="OB",ups="fh-sc-ups1"} 1' in metrics(params(bc="0101"))
+    assert 'anker_ups_status{status="OB",ups="fh-sc-ups1"} 1' in metrics(params(bc="0101"))
 
 
 def test_zero_watts_is_not_reported_as_real_power():
-    assert "nut_real_power_watts" not in metrics(ON_MAINS)
-    assert 'nut_real_power_watts{ups="fh-sc-ups1"} 408' in metrics(ON_BATTERY)
+    assert "anker_real_power_watts" not in metrics(ON_MAINS)
+    assert 'anker_real_power_watts{ups="fh-sc-ups1"} 408' in metrics(ON_BATTERY)
 
 
 def test_no_replace_battery_flag_is_invented():
@@ -319,3 +319,8 @@ def test_replacement_device_keeps_readings_and_the_stale_timer():
     assert device.readings == {"battery_percent": 99}
     assert device.link_down_since == 5.0
     assert device._client_token == "token"
+
+
+def test_no_metric_uses_the_nut_prefix():
+    text = metrics(ON_MAINS, ON_BATTERY, STATUS_REPLY)
+    assert all(line.startswith("anker_") for line in text.splitlines())

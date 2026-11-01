@@ -43,16 +43,18 @@ first if you need it off for longer.
 
 ## Metrics
 
-Names shared with [prometheus-nut-exporter](https://github.com/HON95/prometheus-nut-exporter) mean the same thing here:
+Every metric starts with `anker_`. These mirror [prometheus-nut-exporter](https://github.com/HON95/prometheus-nut-exporter)
+with `anker_` in place of `nut_`: same meaning and shape, so a dashboard can read both with
+`{__name__=~"nut_battery_charge|anker_battery_charge"}`.
 
 | Metric | From | Notes |
 |---|---|---|
-| `nut_ups_info` | | Model, serial, firmware as labels |
-| `nut_status` | `bc` | 1 online, 2 on battery |
-| `nut_ups_status{status}` | `bc`, `bf` | `OL`, `OB`, `CHRG`, `DISCHRG` |
-| `nut_battery_charge` | `c1` | 0 to 1 |
-| `nut_battery_runtime_seconds` | `a4` | Only while discharging |
-| `nut_real_power_watts` | `a6` | Only when above 0 |
+| `anker_ups_info` | | Model, serial, firmware as labels |
+| `anker_status` | `bc` | 1 online, 2 on battery |
+| `anker_ups_status{status}` | `bc`, `bf` | `OL`, `OB`, `CHRG`, `DISCHRG` |
+| `anker_battery_charge` | `c1` | 0 to 1 |
+| `anker_battery_runtime_seconds` | `a4` | Only while discharging |
+| `anker_real_power_watts` | `a6` | Only when above 0 |
 
 And for this unit:
 
