@@ -16,4 +16,6 @@ Load-bearing details. See `README.md` for everything else.
 - **SolixBLE's auto-reconnect never rescans.** A `bluetoothd` restart (e.g. an unattended bluez upgrade) makes BlueZ
   forget every device, and its saved device object then fails until something scans. `Exporter.supervise` handles this:
   don't remove it. It must not rescan while the unit waits for its button, which would void a press.
+- **Back off AC on.** The outlets may have tripped on a real fault, so don't retry quickly or forever at a fast rate.
+- **Exit if a loop dies.** `/metrics` staying up with a dead reconnect loop would look healthy. Docker restarts us.
 - **Disconnect on shutdown.** A stale link keeps the unit from advertising, so the next scan can't find it.

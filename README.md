@@ -32,14 +32,15 @@ code (see `Device._send_command`).
 | `ANKER_CLIENT_TOKEN` | required | Client token, see above |
 | `ANKER_LISTEN_HOST`, `ANKER_LISTEN_PORT` | `127.0.0.1`, `9996` | Where `/metrics` and `/health` listen |
 | `ANKER_POLL_SECONDS` | `60` | How often to ask for a full status |
-| `ANKER_STALE_SECONDS` | `120` | How long the link can be down before `/metrics` returns 503 |
+| `ANKER_STALE_SECONDS` | `120` | How long with no data before `/metrics` returns 503 and it rescans. Keep it above `ANKER_POLL_SECONDS` |
 | `ANKER_REDISCOVER_AFTER_SECONDS` | `60` | How long reconnects can fail before starting over with a fresh scan |
 | `ANKER_AC_KEEP_ON` | `false` (`true` in `docker-compose.yml`) | Turn the AC outlets back on if they stay off |
 | `ANKER_AC_ON_AFTER_SECONDS` | `60` | How long they must be off first, so a deliberate press has a grace period |
-| `ANKER_AC_ON_RETRY_SECONDS` | `300` | Minimum time between AC on commands |
 
 With `ANKER_AC_KEEP_ON=true`, turning the AC off with the unit's button only lasts about a minute. Stop the exporter
-first if you need it off for longer.
+first if you need it off for longer. If the outlets stay off after an attempt, it tries again after 5 minutes, then
+15, then hourly: they may have tripped on a real fault, so it doesn't keep re-energizing it. The count starts over once
+they've been seen on.
 
 ## Metrics
 
@@ -73,8 +74,10 @@ And for this unit:
 | `anker_last_telemetry_age_seconds` | | |
 | `anker_status_requests_total{result}` | | |
 | `anker_ac_on_commands_total` | | AC on commands sent |
+| `anker_ac_on_failures_total` | | AC on commands that couldn't be sent |
+| `anker_ac_off_seconds` | | How long the outlets have been off. Only present while they are |
 
-`/metrics` returns 503 once the link has been down for `ANKER_STALE_SECONDS`, so `up` goes to 0. `/health` always answers,
+`/metrics` returns 503 once nothing has arrived from the unit for `ANKER_STALE_SECONDS`, so `up` goes to 0. `/health` always answers,
 and says whether the unit is waiting for a button press.
 
 ## Fields, as checked on a real unit

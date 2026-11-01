@@ -11,8 +11,9 @@ import json
 import logging
 import os
 import signal
+import sys
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 
 from bleak import BleakScanner
 from SolixBLE import F2000
@@ -33,6 +34,9 @@ NEGOTIATION_DEADLINE_SECONDS = 240
 # A quick retry after a failed handshake got replies that wouldn't decrypt; ~40 s of quiet worked.
 SETTLE_SECONDS = 45
 LINK_CHECK_SECONDS = 5
+# Gaps between AC on attempts while the outlets stay off, then hourly. They may have tripped on a real
+# fault such as a short or an overload, so don't keep re-energizing it every few minutes.
+AC_ON_BACKOFF_SECONDS = (300, 900, 3600)
 
 STATUS_AWAITING_BUTTON = 0x09
 SECONDS_PER_REMAINING_UNIT = 360  # a4 counts tenths of an hour
@@ -55,7 +59,6 @@ class Config:
     rediscover_after_seconds: int = 60
     ac_keep_on: bool = False
     ac_on_after_seconds: int = 60
-    ac_on_retry_seconds: int = 300
 
     @classmethod
     def from_env(cls, env=os.environ):
@@ -70,7 +73,6 @@ class Config:
             rediscover_after_seconds=int(env.get("ANKER_REDISCOVER_AFTER_SECONDS", "60")),
             ac_keep_on=env.get("ANKER_AC_KEEP_ON", "false").lower() == "true",
             ac_on_after_seconds=int(env.get("ANKER_AC_ON_AFTER_SECONDS", "60")),
-            ac_on_retry_seconds=int(env.get("ANKER_AC_ON_RETRY_SECONDS", "300")),
         )
 
 
@@ -79,9 +81,10 @@ class Stats:
     status_ok: int = 0
     status_failed: int = 0
     ac_on_commands: int = 0
+    ac_on_failures: int = 0
     ac_off_since: float | None = None
     ac_on_last_sent: float | None = None
-    connected_once: bool = field(default=False)
+    ac_on_attempts: int = 0  # since the outlets were last seen on
 
 
 def read_int(parameters, key, signed=False):
@@ -162,11 +165,16 @@ class Device(F2000):
         await self._send_command(cmd=CMD_AC_OUTPUT, parameters=PARAMETERS_ON)
 
     async def request_status(self):
-        await self._send_command(cmd=CMD_GET_STATUS, parameters=PARAMETERS_GET_STATUS)
-        payload = await self._listen_for_packet(
-            bytes.fromhex(TELEMETRY_PATTERN_A),
-            bytes.fromhex(CMD_RESPONSE_GET_STATUS),
+        # Listen first: the reply can arrive before the write call returns.
+        listener = asyncio.create_task(
+            self._listen_for_packet(bytes.fromhex(TELEMETRY_PATTERN_A), bytes.fromhex(CMD_RESPONSE_GET_STATUS)),
         )
+        await asyncio.sleep(0)
+        try:
+            await self._send_command(cmd=CMD_GET_STATUS, parameters=PARAMETERS_GET_STATUS)
+            payload = await listener
+        finally:
+            listener.cancel()
         if not payload:
             raise TimeoutError("no reply to the status request")
         await self._process_telemetry(Parameters.parse(payload))
@@ -190,6 +198,8 @@ def ac_on_due(config, stats, ac_output_on, link_up, now):
     """Decide whether to send AC on, tracking how long the outlets have been off."""
     if ac_output_on != 0:
         stats.ac_off_since = None
+        stats.ac_on_last_sent = None
+        stats.ac_on_attempts = 0
         return False
     if stats.ac_off_since is None:
         stats.ac_off_since = now
@@ -197,7 +207,10 @@ def ac_on_due(config, stats, ac_output_on, link_up, now):
         return False
     if now - stats.ac_off_since < config.ac_on_after_seconds:
         return False
-    return stats.ac_on_last_sent is None or now - stats.ac_on_last_sent >= config.ac_on_retry_seconds
+    if stats.ac_on_last_sent is None:
+        return True
+    gap = AC_ON_BACKOFF_SECONDS[min(stats.ac_on_attempts, len(AC_ON_BACKOFF_SECONDS)) - 1]
+    return now - stats.ac_on_last_sent >= gap
 
 
 def _line(name, value, **labels):
@@ -265,16 +278,21 @@ def render_metrics(ups, readings, stats, link_up, telemetry_age):
     metric("anker_status_requests_total", stats.status_ok, result="ok")
     metric("anker_status_requests_total", stats.status_failed, result="failed")
     metric("anker_ac_on_commands_total", stats.ac_on_commands)
+    metric("anker_ac_on_failures_total", stats.ac_on_failures)
+    if stats.ac_off_since is not None:
+        metric("anker_ac_off_seconds", round(time.monotonic() - stats.ac_off_since))
     return "\n".join(out) + "\n"
 
 
 def metrics_healthy(device, config, now):
-    """False once the link has been down too long, so the scrape fails and `up` goes to 0."""
-    if device is None or not device.readings:
+    """False once nothing has arrived for a while, so the scrape fails and `up` goes to 0.
+
+    This goes by data rather than the link: a status request every poll means fresh data keeps arriving even at a
+    steady load, and a link that looks connected but has gone quiet must not keep serving old values.
+    """
+    if device is None or not device.readings or device.last_telemetry is None:
         return False
-    if device.link_up:
-        return True
-    return device.link_down_since is not None and now - device.link_down_since < config.stale_seconds
+    return now - device.last_telemetry < config.stale_seconds
 
 
 class Exporter:
@@ -295,15 +313,19 @@ class Exporter:
             await self.connect()
             await self.wait_until_link_lost()
             if not self.stopping.is_set():
-                _LOGGER.warning(
-                    "Link down for over %d s: scanning again", self.config.rediscover_after_seconds,
-                )
+                _LOGGER.warning("Link down or silent for too long: scanning again")
                 await self.drop(self.device)
 
     async def connect(self):
         """Keep trying until the unit accepts us."""
         while not self.stopping.is_set():
-            found = await BleakScanner.discover(timeout=30, return_adv=True)
+            # This raises while BlueZ is down, for example during the restart that brought us here.
+            try:
+                found = await BleakScanner.discover(timeout=30, return_adv=True)
+            except Exception as error:
+                _LOGGER.warning("Scanning failed: %s", error)
+                await asyncio.sleep(SETTLE_SECONDS)
+                continue
             hit = found.get(self.config.mac)
             if hit is None:
                 _LOGGER.warning("%s not seen in this scan", self.config.mac)
@@ -324,11 +346,17 @@ class Exporter:
 
     async def wait_until_link_lost(self):
         device = self.device
+        connected_at = time.monotonic()
         while not self.stopping.is_set():
+            now = time.monotonic()
+            if device.link_up:
+                # Looks connected, but even the status requests have stopped getting answers.
+                last_heard = max(device.last_telemetry or 0, connected_at)
+                if now - last_heard >= self.config.stale_seconds:
+                    return
             # While connected and waiting for the button, a rescan would void a press in progress.
-            waiting = device.connected and device.awaiting_button
-            if not device.link_up and not waiting:
-                if time.monotonic() - device.link_down_since >= self.config.rediscover_after_seconds:
+            elif not (device.connected and device.awaiting_button):
+                if now - device.link_down_since >= self.config.rediscover_after_seconds:
                     return
             await asyncio.sleep(LINK_CHECK_SECONDS)
 
@@ -380,12 +408,17 @@ class Exporter:
         now = time.monotonic()
         if not ac_on_due(self.config, self.stats, device.readings.get("ac_output_on"), device.link_up, now):
             return
-        _LOGGER.warning("AC outlets have been off for %.0f s: turning them on", now - self.stats.ac_off_since)
         self.stats.ac_on_last_sent = now
+        self.stats.ac_on_attempts += 1
         self.stats.ac_on_commands += 1
+        _LOGGER.warning(
+            "AC outlets have been off for %.0f s: turning them on (attempt %d)",
+            now - self.stats.ac_off_since, self.stats.ac_on_attempts,
+        )
         try:
             await device.turn_ac_on()
         except Exception as error:
+            self.stats.ac_on_failures += 1
             _LOGGER.warning("AC on failed: %s", error)
 
     async def handle_http(self, reader, writer):
@@ -434,19 +467,26 @@ class Exporter:
             asyncio.create_task(self.watch_ac()),
             asyncio.create_task(self.announce_button()),
         ]
-        await self.stopping.wait()
-        for task in tasks:
+        stop = asyncio.create_task(self.stopping.wait())
+        await asyncio.wait([stop, *tasks], return_when=asyncio.FIRST_COMPLETED)
+        # A loop that ended by itself has crashed, and nothing would restart it. Exit and let Docker restart us,
+        # rather than keep serving /metrics with part of the service dead.
+        crashed = [task for task in tasks if task.done() and not self.stopping.is_set()]
+        for task in crashed:
+            _LOGGER.error("%s stopped unexpectedly", task.get_coro().__name__, exc_info=task.exception())
+        for task in [stop, *tasks]:
             task.cancel()
         server.close()
         # Drop the link cleanly, or the unit stays hidden from the next scan.
         if self.device is not None:
             await self.drop(self.device)
+        return 1 if crashed else 0
 
 
 def main():
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s %(levelname)s %(message)s")
     logging.getLogger("SolixBLE").setLevel(logging.WARNING)
-    asyncio.run(Exporter(Config.from_env()).run())
+    sys.exit(asyncio.run(Exporter(Config.from_env()).run()))
 
 
 if __name__ == "__main__":

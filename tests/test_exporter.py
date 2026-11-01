@@ -148,15 +148,30 @@ def test_exporter_never_imports_an_off_command():
     assert not hasattr(exporter, "PARAMETERS_OFF")
 
 
-def test_ac_on_waits_for_the_grace_period_then_retries_slowly():
-    c = config(ac_keep_on=True, ac_on_after_seconds=300, ac_on_retry_seconds=300)
+def test_ac_on_waits_for_the_grace_period_then_backs_off():
+    c = config(ac_keep_on=True, ac_on_after_seconds=60)
     s = exporter.Stats()
-    assert not exporter.ac_on_due(c, s, 0, True, 1000)
-    assert not exporter.ac_on_due(c, s, 0, True, 1299)
-    assert exporter.ac_on_due(c, s, 0, True, 1300)
-    s.ac_on_last_sent = 1300
-    assert not exporter.ac_on_due(c, s, 0, True, 1500)
-    assert exporter.ac_on_due(c, s, 0, True, 1600)
+    now = 1000
+    assert not exporter.ac_on_due(c, s, 0, True, now)
+    assert not exporter.ac_on_due(c, s, 0, True, now + 59)
+    now += 60
+    # Attempts then gaps of 5 minutes, 15 minutes, and an hour from there on.
+    for gap in (300, 900, 3600, 3600, 3600):
+        assert exporter.ac_on_due(c, s, 0, True, now)
+        s.ac_on_last_sent = now
+        s.ac_on_attempts += 1
+        assert not exporter.ac_on_due(c, s, 0, True, now + gap - 1)
+        now += gap
+
+
+def test_backoff_starts_over_once_the_outlets_have_come_back():
+    c = config(ac_keep_on=True, ac_on_after_seconds=60)
+    s = exporter.Stats(ac_off_since=1000, ac_on_last_sent=2000, ac_on_attempts=4)
+    assert not exporter.ac_on_due(c, s, 1, True, 2001)
+    assert s.ac_on_attempts == 0
+    assert s.ac_on_last_sent is None
+    assert not exporter.ac_on_due(c, s, 0, True, 2002)
+    assert exporter.ac_on_due(c, s, 0, True, 2062)
 
 
 def test_ac_on_defaults_to_a_one_minute_wait():
@@ -212,16 +227,16 @@ def test_ac_on_never_sent_when_off_unknown_or_disabled(keep_on, state, link):
     assert not exporter.ac_on_due(c, exporter.Stats(), state, link, 1000)
 
 
-def test_metrics_fail_once_the_link_has_been_down_too_long():
+def test_metrics_fail_once_nothing_has_arrived_for_too_long():
     c = config(stale_seconds=120)
-    up = SimpleNamespace(readings={"x": 1}, link_up=True, link_down_since=None)
-    down = SimpleNamespace(readings={"x": 1}, link_up=False, link_down_since=1000)
-    empty = SimpleNamespace(readings={}, link_up=True, link_down_since=None)
-    assert exporter.metrics_healthy(up, c, 5000)
-    assert exporter.metrics_healthy(down, c, 1100)
-    assert not exporter.metrics_healthy(down, c, 1121)
-    assert not exporter.metrics_healthy(empty, c, 5000)
-    assert not exporter.metrics_healthy(None, c, 5000)
+    recent = SimpleNamespace(readings={"x": 1}, last_telemetry=1000)
+    empty = SimpleNamespace(readings={}, last_telemetry=1000)
+    never = SimpleNamespace(readings={"x": 1}, last_telemetry=None)
+    assert exporter.metrics_healthy(recent, c, 1119)
+    assert not exporter.metrics_healthy(recent, c, 1120)
+    assert not exporter.metrics_healthy(empty, c, 1000)
+    assert not exporter.metrics_healthy(never, c, 1000)
+    assert not exporter.metrics_healthy(None, c, 1000)
 
 
 class FakeScanner:
@@ -230,6 +245,7 @@ class FakeScanner:
     @classmethod
     async def discover(cls, timeout, return_adv):
         cls.scans += 1
+        await asyncio.sleep(0.01)  # a real scan yields to the event loop
         return {"AA:BB": (object(), object())}
 
 
@@ -243,6 +259,7 @@ class FakeDevice:
         self.awaiting_button = False
         self.announcement = None
         self.link_down_since = None
+        self.last_telemetry = None
         self.readings = {}
         self.dropped = False
 
@@ -324,3 +341,94 @@ def test_replacement_device_keeps_readings_and_the_stale_timer():
 def test_no_metric_uses_the_nut_prefix():
     text = metrics(ON_MAINS, ON_BATTERY, STATUS_REPLY)
     assert all(line.startswith("anker_") for line in text.splitlines())
+
+
+def test_rescans_when_the_link_looks_up_but_has_gone_quiet(fake_ble):
+    def quiet(device):
+        device.last_telemetry = exporter.time.monotonic() - 1000
+
+    supervise_until(quiet, {"stale_seconds": 0})
+    assert FakeScanner.scans >= 2
+    assert FakeDevice.built[0].dropped
+
+
+def test_no_rescan_while_data_keeps_arriving(fake_ble):
+    def fresh(device):
+        device.last_telemetry = exporter.time.monotonic()
+
+    supervise_until(fresh, {"stale_seconds": 60})
+    assert FakeScanner.scans == 1
+
+
+def test_scan_errors_are_survived_while_bluez_is_down(fake_ble, monkeypatch):
+    class Failing:
+        calls = 0
+
+        @classmethod
+        async def discover(cls, timeout, return_adv):
+            cls.calls += 1
+            if cls.calls == 1:
+                raise RuntimeError("org.bluez.Error.NotReady")
+            return {"AA:BB": (object(), object())}
+
+    monkeypatch.setattr(exporter, "BleakScanner", Failing)
+    monkeypatch.setattr(exporter, "SETTLE_SECONDS", 0)
+
+    async def scenario():
+        e = exporter.Exporter(config())
+        await asyncio.wait_for(e.connect(), 2)
+        assert e.device is FakeDevice.built[0]
+
+    asyncio.run(scenario())
+    assert Failing.calls == 2
+
+
+def test_a_crashed_loop_ends_the_process_so_docker_restarts_it(fake_ble, monkeypatch):
+    async def boom(self):
+        raise RuntimeError("bug")
+
+    monkeypatch.setattr(exporter.Exporter, "poll", boom)
+
+    async def scenario():
+        e = exporter.Exporter(config(listen_port=0))
+        return await asyncio.wait_for(e.run(), 3)
+
+    assert asyncio.run(scenario()) == 1
+
+
+def test_clean_stop_exits_zero(fake_ble):
+    async def scenario():
+        e = exporter.Exporter(config(listen_port=0))
+        task = asyncio.create_task(e.run())
+        await asyncio.sleep(0.05)
+        e.stopping.set()
+        return await asyncio.wait_for(task, 3)
+
+    assert asyncio.run(scenario()) == 0
+
+
+def test_status_listener_is_registered_before_the_request_goes_out(monkeypatch):
+    order = []
+
+    async def fake_listen(self, pattern, cmd, timeout=10):
+        order.append("listen")
+        await asyncio.sleep(0.01)
+        return None
+
+    async def fake_send(self, cmd=None, parameters=None, **kwargs):
+        order.append("send")
+
+    monkeypatch.setattr(F2000, "_send_command", fake_send)
+    monkeypatch.setattr(exporter.Device, "_listen_for_packet", fake_listen)
+    device = exporter.Device.__new__(exporter.Device)
+    device._ac_on_allowed = False
+    with pytest.raises(TimeoutError):
+        asyncio.run(device.request_status())
+    assert order == ["listen", "send"]
+
+
+def test_off_time_and_failures_are_exported():
+    s = exporter.Stats(ac_off_since=exporter.time.monotonic() - 90, ac_on_failures=2)
+    text = exporter.render_metrics("u", {}, s, True, None)
+    assert 'anker_ac_off_seconds{ups="u"} 90' in text
+    assert 'anker_ac_on_failures_total{ups="u"} 2' in text

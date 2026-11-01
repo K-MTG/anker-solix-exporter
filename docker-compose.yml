@@ -8,6 +8,13 @@ services:
     # No privileged mode or extra capabilities are needed.
     security_opt:
       - apparmor:unconfined
+      - no-new-privileges:true
+    # It only needs the D-Bus socket and a loopback port.
+    cap_drop:
+      - ALL
+    read_only: true
+    tmpfs:
+      - /tmp
     volumes:
       - /run/dbus:/run/dbus:ro
     environment:
