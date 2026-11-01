@@ -1,0 +1,17 @@
+# SolixBLE is pinned to a beta: 3.9.0 is refused by this unit, which advertises capability 0x04. Everything is
+# pinned so a rebuild can't change how the unit is talked to.
+aiooui==0.1.11
+bleak==3.0.2
+bleak-retry-connector==4.7.1
+bluetooth-adapters==2.4.0
+cffi==2.1.1
+construct==2.10.70
+cryptography==50.0.2
+dbus-fast==5.2.0
+pycparser==3.12
+pycryptodome==4.2.0
+SolixBLE==4.0.0b3
+tzdata==2026.6
+tzlocal==5.4.5
+uart-devices==0.1.1
+usb-devices==0.5.1

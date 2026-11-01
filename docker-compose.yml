@@ -1,0 +1,28 @@
+services:
+  anker-solix-exporter:
+    build: .
+    container_name: anker-solix-exporter
+    # To serve /metrics on the host's 127.0.0.1 for its local vmagent.
+    network_mode: host
+    # Bluetooth goes through BlueZ on the host over D-Bus, which Docker's default AppArmor profile blocks.
+    # No privileged mode or extra capabilities are needed.
+    security_opt:
+      - apparmor:unconfined
+    volumes:
+      - /run/dbus:/run/dbus:ro
+    environment:
+      ANKER_MAC: "AA:BB:CC:DD:EE:FF"
+      ANKER_UPS_NAME: "my-ups"
+      # Turn the AC outlets back on if they stay off this long. Stop this service first to keep them off for longer.
+      ANKER_AC_KEEP_ON: "true"
+      ANKER_AC_ON_AFTER_SECONDS: "60"
+    # Holds ANKER_CLIENT_TOKEN. See the README.
+    env_file:
+      - anker.env
+    mem_limit: 128m
+    restart: unless-stopped
+    logging:
+      driver: json-file
+      options:
+        max-size: 10m
+        max-file: "3"
